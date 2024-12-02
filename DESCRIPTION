@@ -1,0 +1,11 @@
+Package: RankingDynamics
+Type: Package
+Title: Generate Parameters of Dynamic Ranking Model
+Version: 0.1.0
+Author: Dave Armitage
+Maintainer: Dave Armitage <david.armitage@oist.jp>
+Description: Generates ranking parameters with example data
+Imports: dplyr, ggplot2
+License: MIT
+Encoding: UTF-8
+LazyData: true
