@@ -1,200 +1,344 @@
-#### Main code for calculating Rank Flux model paramters (see below)
-
-#' @title Analyze Rank Dynamics in a Time Series
+#' Analyze rank dynamics in a time series
 #'
-#' @description This function performs an analysis of rank dynamics from a time-series
-#' dataset. The dataset should include ranks of entities across multiple time points.
-#' The function computes metrics like rank flux, probability of leaving ranks,
-#' probability of rank changes, rank turnover, and rank inertia. It also solves
-#' transcendental equations for rank flux and openness metrics, performing checks for validity.
+#' @description
+#' Calculates empirical rank-dynamics summaries and fits the displacement /
+#' replacement model described by Iniguez et al. The input should already be a
+#' ranked data set: the first column contains entity identifiers and all remaining
+#' columns contain ranks at successive time points. Ranks outside the retained
+#' list should be coded as `NA`.
 #'
-#' @param rank_data A data.frame where the first column contains entities (e.g., species)
-#' and subsequent columns represent rankings or scores at different time points.
+#' @param rank_data A data frame. Column 1 contains entity identifiers; columns
+#'   2 onward contain ranks through time.
+#' @param verbose Logical. If `TRUE`, print model-fit diagnostics.
+#' @param check_tol Numeric tolerance used to flag poor model fits.
+#' @param inertia_threshold Numeric in `(0, 1)`. Fraction of `N0` defining the
+#'   top region for rank inertia. The default, `0.5`, follows the supplement.
+#' @param root_tol Numeric tolerance passed to `uniroot()`.
 #'
-#' @return A list containing the computed metrics and results:
-#' - `rank_data`: Processed rank data.
-#' - `Wlevy`, `Wdiff`, `Wrepl`: Metrics for ranking dynamics.
-#' - `pnu_star`, `ptau_star`: Solutions to transcendental equations.
-#' - `tau_r`, `nu_r`: Time-related metrics.
-#' - `p`: Probability of remaining ranked.
-#' - `Spp`: Species persistence.
-#' - `rank_inertia`: Rank inertia over time.
-#' - `Nt`: Turnover-adjusted rank counts.
-#' - `Time`: Number of time points.
-#' - `rank_turnover`: Rank turnover at each time point.
-#' - `mean_rank_turnover`: Average rank turnover.
-#' - `rank_flux`: Rank flux for transitions between time points.
-#' - `mean_rank_flux`: Average rank flux.
-#' - `leave_probabilities`: Probabilities of leaving ranks.
-#' - `probabilities_rank_change`: Probabilities of rank changes.
-#' - `timefrac`: Normalized time fraction for plotting.
-#' - `check_1`, `check_2`, `check_3`: Results of validity checks for calculations.
+#' @return A list containing empirical rank summaries, fitted model parameters,
+#'   dynamical regime probabilities, and fit diagnostics.
 #'
-#' @importFrom stats optimize
-#' @import dplyr
-
 #' @export
+rank_analysis <- function(rank_data,
+                          verbose = TRUE,
+                          check_tol = 1e-3,
+                          inertia_threshold = 0.5,
+                          root_tol = 1e-12) {
+  validate_rank_data(rank_data, inertia_threshold)
 
-rank_analysis <- function(rank_data) {
+  entity_names <- as.character(rank_data[[1]])
+  ranks <- as.data.frame(rank_data[, -1, drop = FALSE])
+  ranks[] <- lapply(ranks, as.numeric)
 
-  rank_data <- rank_data[,-1] # remove first column
-  N0 <- length(na.omit(rank_data[,1])) # estimate N0 from data
-
-  # Rank Flux Calculation (values range between zero and one, indicating a )
-  # measure of openness or closedness
-  # NEED TO MODIFY FOR CLOSED LISTS
-  rank_flux_list <- list()
-  for (i in 2:ncol(rank_data)) {
-    top_t_minus_1 <- which(rank_data[, i-1] <= N0)
-    top_t <- which(rank_data[, i] <= N0)
-    leaves <- setdiff(top_t_minus_1, top_t)
-    flux <- length(leaves) / N0
-    rank_flux_list[[paste0(colnames(rank_data)[i-1], " to ", colnames(rank_data)[i])]] <- flux
+  n_time <- ncol(ranks)
+  if (n_time < 2) {
+    stop("rank_data must contain at least two rank/time columns after the entity column.", call. = FALSE)
   }
-  rank_flux <- unlist(rank_flux_list)
-  mean_rank_flux <- mean(rank_flux)
 
-  # Probability of Leaving Ranking
-  leave_counts <- rep(0, N0)
-  total_counts <- rep(0, N0)
+  # Ranking-list size. This assumes rank_data has already been trimmed to a
+  # constant list size; get_ranked_data() does this by retaining the top N0 ranks.
+  N0 <- sum(!is.na(ranks[[1]]))
+  if (N0 <= 0) stop("The first rank column contains no non-NA ranks.", call. = FALSE)
 
-  for (i in 2:ncol(rank_data)) {
-    rank_t_minus_1 <- rank_data[, i - 1]
-    rank_t <- rank_data[, i]
-    left_ranking <- is.na(rank_t)
-    for (R in 1:N0) {
-      leave_counts[R] <- leave_counts[R] + sum(left_ranking & rank_t_minus_1 == R, na.rm = TRUE)
-      total_counts[R] <- total_counts[R] + sum(rank_t_minus_1 == R, na.rm = TRUE)
+  rank_flux <- calculate_rank_flux(ranks, N0)
+  mean_rank_flux <- mean(rank_flux, na.rm = TRUE)
+
+  leave_probabilities <- calculate_leave_probabilities(ranks, N0)
+  probabilities_rank_change <- calculate_rank_change_probabilities(ranks, entity_names, N0)
+
+  turnover <- calculate_rank_turnover(ranks, entity_names, N0)
+  Nt <- turnover$Nt
+  rank_turnover <- turnover$rank_turnover
+
+  inertia <- calculate_rank_inertia(
+    ranks = ranks,
+    entity_names = entity_names,
+    N0 = N0,
+    c = inertia_threshold
+  )
+
+  p0 <- N0 / max(Nt)
+  flux <- mean_rank_flux
+  open_deriv <- turnover$mean_rank_turnover
+
+  model <- fit_rank_model(
+    p = p0,
+    odot = open_deriv,
+    F = flux,
+    Splusplus = inertia$Splusplus,
+    root_tol = root_tol
+  )
+
+  diagnostics <- calculate_model_diagnostics(
+    p = p0,
+    odot = open_deriv,
+    F = flux,
+    nu = model$pnu_star,
+    tau = model$ptau_star,
+    check_tol = check_tol
+  )
+
+  if (verbose) {
+    message("Check 1 (turnover-rate match): ", signif(diagnostics$check_1, 5))
+    message("Check 2 (flux match): ", signif(diagnostics$check_2, 5))
+    message("Check 3 (Wlevy + Wdiff + Wrepl): ", signif(diagnostics$check_3, 5))
+    message("Fit quality: ", diagnostics$fit_quality)
+  }
+
+  list(
+    rank_data = ranks,
+    entity_names = entity_names,
+    N0 = N0,
+    Time = n_time,
+    p = p0,
+    Nt = Nt,
+    deltaNt = diff(Nt),
+    rank_turnover = rank_turnover,
+    mean_rank_turnover = open_deriv,
+    rank_flux = rank_flux,
+    mean_rank_flux = mean_rank_flux,
+    leave_probabilities = leave_probabilities,
+    probabilities_rank_change = probabilities_rank_change,
+    rank_inertia = inertia$rank_inertia,
+    rank_inertia_initial = inertia$rank_inertia_initial,
+    Spp = inertia$Splusplus,
+    pnu_star = model$pnu_star,
+    ptau_star = model$ptau_star,
+    nu_r = model$nu_r,
+    tau_r = model$tau_r,
+    Wlevy = diagnostics$Wlevy,
+    Wdiff = diagnostics$Wdiff,
+    Wrepl = diagnostics$Wrepl,
+    check_1 = diagnostics$check_1,
+    check_2 = diagnostics$check_2,
+    check_3 = diagnostics$check_3,
+    fit_quality = diagnostics$fit_quality,
+    timefrac = seq_len(n_time) / n_time,
+    transition_timefrac = seq(2, n_time) / n_time,
+    inertia_timefrac = seq_len(n_time - 1) / n_time
+  )
+}
+
+validate_rank_data <- function(rank_data, inertia_threshold) {
+  if (!is.data.frame(rank_data)) {
+    stop("rank_data must be a data frame.", call. = FALSE)
+  }
+  if (ncol(rank_data) < 3) {
+    stop("rank_data must have one entity column and at least two rank/time columns.", call. = FALSE)
+  }
+  if (anyDuplicated(rank_data[[1]]) > 0) {
+    stop("Entity identifiers in the first column must be unique.", call. = FALSE)
+  }
+  if (!is.numeric(inertia_threshold) || length(inertia_threshold) != 1 ||
+      inertia_threshold <= 0 || inertia_threshold >= 1) {
+    stop("inertia_threshold must be a single number between 0 and 1.", call. = FALSE)
+  }
+}
+
+calculate_rank_flux <- function(ranks, N0) {
+  vapply(2:ncol(ranks), function(t) {
+    in_previous <- which(!is.na(ranks[[t - 1]]) & ranks[[t - 1]] <= N0)
+    in_current <- which(!is.na(ranks[[t]]) & ranks[[t]] <= N0)
+    length(setdiff(in_previous, in_current)) / N0
+  }, numeric(1))
+}
+
+calculate_leave_probabilities <- function(ranks, N0) {
+  leave_counts <- numeric(N0)
+  total_counts <- numeric(N0)
+
+  for (t in 2:ncol(ranks)) {
+    previous <- ranks[[t - 1]]
+    current <- ranks[[t]]
+
+    for (rank in seq_len(N0)) {
+      at_rank <- !is.na(previous) & previous == rank
+      leave_counts[rank] <- leave_counts[rank] + sum(at_rank & is.na(current))
+      total_counts[rank] <- total_counts[rank] + sum(at_rank)
     }
   }
-  leave_probabilities <- leave_counts / total_counts
 
-  # Probability of Rank Change
-  change_counts <- rep(0, N0)
+  total_counts[total_counts == 0] <- NA_real_
+  leave_counts / total_counts
+}
 
-  for (i in 1:(ncol(rank_data) - 1)) {
-    rank_t <- rank_data[, i]
-    rank_t_plus_1 <- rank_data[, i + 1]
-    for (R in 1:N0) {
-      entity_t <- rownames(rank_data)[which(rank_t == R)]
-      entity_t_plus_1 <- rownames(rank_data)[which(rank_t_plus_1 == R)]
-      if (length(entity_t) == 1 && length(entity_t_plus_1) == 1) {
-        if (entity_t != entity_t_plus_1) {
-          change_counts[R] <- change_counts[R] + 1
-        }
-        total_counts[R] <- total_counts[R] + 1
+calculate_rank_change_probabilities <- function(ranks, entity_names, N0) {
+  change_counts <- numeric(N0)
+  total_counts <- numeric(N0)
+
+  for (t in 2:ncol(ranks)) {
+    previous <- ranks[[t - 1]]
+    current <- ranks[[t]]
+
+    for (rank in seq_len(N0)) {
+      previous_entity <- entity_names[!is.na(previous) & previous == rank]
+      current_entity <- entity_names[!is.na(current) & current == rank]
+
+      if (length(previous_entity) == 1 && length(current_entity) == 1) {
+        change_counts[rank] <- change_counts[rank] + as.integer(previous_entity != current_entity)
+        total_counts[rank] <- total_counts[rank] + 1
       }
     }
   }
-  probabilities_rank_change <- change_counts / total_counts
 
-  # Rank Turnover
-  unique_elements_seen <- list()
-  rank_turnover <- numeric(ncol(rank_data))
+  total_counts[total_counts == 0] <- NA_real_
+  change_counts / total_counts
+}
 
-  for (t in 1:ncol(rank_data)) {
-    elements_in_t <- rownames(rank_data)[!is.na(rank_data[, t])]
-    if (t == 1) {
-      unique_elements_seen[[t]] <- elements_in_t
-    } else {
-      unique_elements_seen[[t]] <- unique(c(unique_elements_seen[[t - 1]], elements_in_t))
-    }
-    rank_turnover[t] <- length(unique_elements_seen[[t]]) / N0
+calculate_rank_turnover <- function(ranks, entity_names, N0) {
+  seen <- character(0)
+  Nt <- numeric(ncol(ranks))
+
+  for (t in seq_len(ncol(ranks))) {
+    current <- entity_names[!is.na(ranks[[t]]) & ranks[[t]] <= N0]
+    seen <- union(seen, current)
+    Nt[t] <- length(seen)
   }
 
-  # Rank Inertia
-  top_half_threshold <- 0.5 * N0
-  rank_inertia <- numeric(ncol(rank_data) - 1)
-  initial_top_half <- rownames(rank_data)[rank_data[, 1] <= top_half_threshold & !is.na(rank_data[, 1])]
+  rank_turnover <- Nt / N0
 
-  for (t in 2:ncol(rank_data)) {
-    top_half_in_t <- rownames(rank_data)[rank_data[, t] <= top_half_threshold & !is.na(rank_data[, t])]
-    remaining_in_top_half <- sum(initial_top_half %in% top_half_in_t)
-    rank_inertia[t - 1] <- remaining_in_top_half / length(initial_top_half)
+  # Paper definition: odot = (o_{T-1} - o_0) / (T - 1), where there are
+  # T observations and T - 1 transitions.
+  mean_rank_turnover <-
+    (tail(rank_turnover, 1) - rank_turnover[1]) / (length(rank_turnover) - 1)
+
+  list(
+    Nt = Nt,
+    rank_turnover = rank_turnover,
+    mean_rank_turnover = mean_rank_turnover
+  )
+}
+
+calculate_rank_inertia <- function(ranks, entity_names, N0, c = 0.5) {
+  top_cutoff <- c * N0
+  n_time <- ncol(ranks)
+
+  top_entities <- lapply(seq_len(n_time), function(t) {
+    entity_names[!is.na(ranks[[t]]) & ranks[[t]] <= top_cutoff]
+  })
+
+  # Paper-style S++_lag: probability that an element in the top at t0 remains
+  # in the top after 'lag' observations, averaged over all compatible t0.
+  rank_inertia <- vapply(seq_len(n_time - 1), function(lag) {
+    vals <- vapply(seq_len(n_time - lag), function(t0) {
+      start_top <- top_entities[[t0]]
+      end_top <- top_entities[[t0 + lag]]
+
+      if (length(start_top) == 0) return(NA_real_)
+      sum(start_top %in% end_top) / length(start_top)
+    }, numeric(1))
+
+    mean(vals, na.rm = TRUE)
+  }, numeric(1))
+
+  # Kept for comparison with the earlier implementation: retention relative only
+  # to the first observed ranking.
+  initial_top <- top_entities[[1]]
+  rank_inertia_initial <- vapply(2:n_time, function(t) {
+    if (length(initial_top) == 0) return(NA_real_)
+    sum(initial_top %in% top_entities[[t]]) / length(initial_top)
+  }, numeric(1))
+
+  list(
+    rank_inertia = rank_inertia,
+    rank_inertia_initial = rank_inertia_initial,
+    Splusplus = rank_inertia[1]
+  )
+}
+
+fit_rank_model <- function(p, odot, F, Splusplus, root_tol = 1e-12) {
+  if (isTRUE(all.equal(F, 0)) && isTRUE(all.equal(odot, 0))) {
+    nu <- 0
+    tau <- log((1 - 0.5 * p) / (Splusplus - 0.5 * p))
+
+    return(list(
+      pnu_star = nu,
+      ptau_star = tau,
+      nu_r = NA_real_,
+      tau_r = NA_real_
+    ))
   }
 
-  mean_rank_turnover <- (tail(rank_turnover, 1) - rank_turnover[1]) / length(rank_turnover)
-  Nt <- rank_turnover * N0
-  Time <- ncol(rank_data)
-  N <- tail(Nt, 1)
-  p <- N0 / N
+  root <- find_rank_model_root(p = p, odot = odot, F = F, tol = root_tol)
+  nu <- root$nu_star
+  tau <- root$tau_star
 
-  # Transcendental Equation Calculations (using base R functions)
-  flux <- mean_rank_flux
-  open_deriv <- mean_rank_turnover
-  p0 <- p
-  Splusplus <- rank_inertia[1]
+  list(
+    pnu_star = nu,
+    ptau_star = tau,
+    nu_r = (nu - p * odot) / odot,
+    tau_r = tau / (p * (1 - p) * odot)
+  )
+}
 
-  ptau_func <- function(pnu) {
-    pnu * (pnu - open_deriv) / (p0 * open_deriv - pnu)
-  }
-  exp_func <- function(pnu) {
-    exp(-ptau_func(pnu))
-  }
-  pnu_func <- function(pnu) {
-    log((p0 + (1 - p0) * exp_func(pnu)) / (1 - flux))
+find_rank_model_root <- function(p, odot, F, tol = 1e-12, n_grid = 5000) {
+  tau_of_nu <- function(nu) nu * (nu - odot) / (p * odot - nu)
+
+  rhs_of_nu <- function(nu) {
+    tau <- tau_of_nu(nu)
+    log((p + (1 - p) * exp(-tau)) / (1 - F))
   }
 
-  pnu_lambda <- function(pnu) {
-    abs(pnu - pnu_func(pnu))
+  g <- function(nu) nu - rhs_of_nu(nu)
+
+  pole <- p * odot
+  hi <- odot
+  eps <- .Machine$double.eps * 10
+
+  grid <- seq(pole + eps, hi - eps, length.out = n_grid)
+  g_values <- g(grid)
+  keep <- is.finite(g_values)
+  grid <- grid[keep]
+  g_values <- g_values[keep]
+
+  sign_change <- which(diff(sign(g_values)) != 0)
+  if (length(sign_change) == 0) {
+    stop("No model root found in the admissible interval.", call. = FALSE)
   }
 
-  if(flux == 0 & open_deriv == 0){
+  roots <- vapply(sign_change, function(i) {
+    uniroot(g, interval = grid[i + 0:1], tol = tol)$root
+  }, numeric(1))
 
-    pnu_star <- 0
+  tau_roots <- tau_of_nu(roots)
+  physical <- which(is.finite(tau_roots) & tau_roots > 0)
 
-    ptau_star <- log((1-0.5*p0)/(Splusplus-0.5*p0))
+  if (length(physical) == 0) {
+    stop("No physically admissible model root found.", call. = FALSE)
+  }
 
+  # Usually there is one physical root. If there are multiple, use the first.
+  list(
+    nu_star = roots[physical][1],
+    tau_star = tau_roots[physical][1],
+    extra_roots = roots[-physical]
+  )
+}
+
+calculate_model_diagnostics <- function(p, odot, F, nu, tau, check_tol) {
+  Wlevy <- exp(-nu) * (1 - exp(-tau))
+  Wdiff <- exp(-nu - tau)
+  Wrepl <- 1 - exp(-nu)
+
+  if (is.na(odot) || isTRUE(all.equal(odot, 0))) {
+    check_1 <- NA_real_
   } else {
-
-    pnu_res <- optimize(pnu_lambda,
-                        interval = c(p0 * open_deriv, open_deriv),
-                        tol = .Machine$double.eps^0.9)
-
-    pnu_star <- pnu_res$minimum
-
-    ptau_star <- ifelse(ptau_func(pnu_star) > 1, 1, ptau_func(pnu_star))
+    check_1 <- abs(nu * ((nu + tau) / (nu + p * tau)) - odot)
   }
-  # Final Calculations
-  tau_r <- ptau_star / (p0 * (1 - p0) * open_deriv)
-  nu_r <- (pnu_star - p0 * open_deriv) / open_deriv
-  Wlevy <- exp(-pnu_star) * (1 - exp(-ptau_star))
-  Wdiff <- exp(-pnu_star) * exp(-ptau_star)
-  Wrepl <- 1 - exp(-pnu_star)
 
-  # Condition checks and warnings
-  check_1 <- abs(round(pnu_star * ((pnu_star + ptau_star) / (pnu_star + p0 * ptau_star)), 12) - open_deriv)
-  check_2 <- abs(round(1 - exp(-pnu_star) * (p0 + (1 - p0) * exp(-ptau_star)), 12) - flux)
+  check_2 <- abs(1 - exp(-nu) * (p + (1 - p) * exp(-tau)) - F)
   check_3 <- Wlevy + Wdiff + Wrepl
 
-  # Print the results of the checks
-  cat("Check 1: open_deriv - f(ptau_star, pnu_star) =", check_1, "<-should be near zero \n")
-  cat("Check 2: flux_difference - f(ptau_star, pnu_star)  =", check_2, "<-should be near zero \n")
-  cat("Check 3: (Wlevy + Wdiff + Wrepl difference) =", check_3, "<-should be 1 \n")
+  max_check <- max(check_1, check_2, na.rm = TRUE)
+  fit_quality <- ifelse(max_check > check_tol, "fail", "ok")
 
-  timefrac = (1:Time) / Time
-  # Return results
   list(
-    rank_data = rank_data,
     Wlevy = Wlevy,
     Wdiff = Wdiff,
     Wrepl = Wrepl,
-    pnu_star = pnu_star,
-    ptau_star = ptau_star,
-    tau_r = tau_r,
-    nu_r = nu_r,
-    p = p,
-    Spp = Splusplus,
-    rank_inertia = rank_inertia,
-    Nt = Nt,
-    Time = Time,
-    rank_turnover = rank_turnover,
-    mean_rank_turnover = mean_rank_turnover,
-    rank_flux = rank_flux,
-    mean_rank_flux = mean_rank_flux,
-    rank_inertia = rank_inertia,
-    leave_probabilities = leave_probabilities,
-    probabilities_rank_change = probabilities_rank_change,
-    timefrac = timefrac
+    check_1 = check_1,
+    check_2 = check_2,
+    check_3 = check_3,
+    fit_quality = fit_quality
   )
 }

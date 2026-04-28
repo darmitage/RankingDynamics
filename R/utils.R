@@ -64,62 +64,54 @@ permute_dataframe <- function(wide_data, N, epsilon = NULL) {
   return(permuted_list)
 }
 
-
 #' @title Create a ranked list from a table of scores
 #'
-#' @description Function to convert an S x T + 1 dataframe of
-#' scores into a ranked list. It assumes the data frame's first
-#' column is a list of entities and subsequent columns are
-#' rankings at each census. Users can either leave N0 empty
-#' (which will set N0 as the number of nonzero scores at first census)
-#' or specify it (e.g., setting it to 100 will make the list a "top 100" list).
+#' @description Convert an S x T+1 data.frame of scores (species x time points)
+#' into a ranked list of size N0. If N0 is not provided, it's set to the minimum number
+#' of non-NA entries across all time points, ensuring consistency.
 #'
-#' @param wide_data A data.frame or a list of data.frames where the first column
-#' are species or other identifiers and subsequent columns are their abundances
-#' (or more generally scores) at various census points.
-#' @param N0 The selected ranking list size. If unspecified, it will calculate
-#' N0 as the size of the non-NA entries at the first census (column 2).
+#' @param wide_data A data.frame or list of data.frames with species in column 1,
+#' and abundance/score values in columns 2 onward.
+#' @param N0 Integer, number of ranks to retain. If NULL, uses min non-NA count per column.
 #'
-#' @return Returns a ranked dataframe or a list of ranked dataframes.
-#'
+#' @return A ranked data.frame or list of ranked data.frames with only top N0 per column retained.
 #' @import dplyr
 #' @export
 
 get_ranked_data <- function(wide_data, N0 = NULL) {
-  # Helper function to process a single dataframe
-  process_dataframe <- function(df, N0) {
-    # Ensure input is valid
-    if (!is.data.frame(df)) stop("Each element in the input list must be a data frame.")
-    if (ncol(df) < 2) stop("Each data frame must have at least two columns.")
 
-    # Set default value for N0 if not provided
+  process_dataframe <- function(df, N0) {
+    if (!is.data.frame(df)) stop("Each element must be a data.frame.")
+    if (ncol(df) < 2) stop("Each data.frame must have at least two columns.")
+
+    # Convert scores to numeric
+    df <- df %>%
+      mutate(across(-1, as.numeric))
+
+    # Determine N0 if not provided: minimum number of non-NA entries across time points
     if (is.null(N0)) {
-      N0 <- sum(!is.na(df[[2]])) # Count non-NA values in the second column
+      N0 <- min(colSums(!is.na(df[, -1])))
     }
 
-    # Print the value of N0 for debugging
-    message("N0 = ", N0)
+    message("Using N0 = ", N0)
 
-    # Rank and filter the data
-    ranked_data <- df %>%
-      mutate(across(-1, as.numeric)) %>%  # Convert all columns (except the first) to numeric
-      mutate(across(-1, ~ rank(-., na.last = "keep", ties.method = "random"))) %>% # Rank in descending order
-      mutate(across(2, ~ ifelse(. > N0, NA, .))) # Set values above N0 in the second column to NA
+    # Rank each time point and mask values beyond N0
+    ranked <- df %>%
+      mutate(across(-1, ~ rank(-., na.last = "keep", ties.method = "random"))) %>%
+      mutate(across(-1, ~ ifelse(. > N0, NA, .)))
 
-    # Remove rows where all ranked columns (except the first) are NA
-    filtered_data <- ranked_data[rowSums(!is.na(ranked_data[, -1])) > 0, ]
+    # Remove rows that are NA across all time points
+    ranked <- ranked[rowSums(!is.na(ranked[, -1])) > 0, ]
 
-    return(filtered_data)
+    return(ranked)
   }
 
-  # Check if input is a single dataframe or a list of dataframes
+  # Dispatch based on input type
   if (is.data.frame(wide_data)) {
-    # Process a single dataframe
     return(process_dataframe(wide_data, N0))
   } else if (is.list(wide_data)) {
-    # Process a list of dataframes
     return(lapply(wide_data, process_dataframe, N0 = N0))
   } else {
-    stop("Input must be either a data frame or a list of data frames.")
+    stop("Input must be a data.frame or list of data.frames.")
   }
 }
