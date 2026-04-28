@@ -24,7 +24,6 @@ Ranking systems are common across nature and society, from microbial communities
   - `Wdiff`
   - `Wrepl`
 - Assess uncertainty from tied ranks using permutation approaches
-- Reproduce key analyses from published rank-dynamics theory
 
 ---
 
