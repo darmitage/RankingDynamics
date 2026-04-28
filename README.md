@@ -138,7 +138,7 @@ RankingDynamics/
 
 ---
 
-## Scientific Basis
+## Citations
 
 This package is based primarily on:
 
@@ -166,18 +166,6 @@ This package is based primarily on:
 ```r
 citation("RankingDynamics")
 ```
-
----
-
-## Future Directions
-
-Planned improvements include:
-
-- Native plotting functions for Figure S17-style visualizations
-- Bayesian parameter fitting extensions
-- Expanded null-model generation
-- Greater compatibility with ecological time-series workflows
-- CRAN submission
 
 ---
 
