@@ -38,16 +38,6 @@ Ranking systems are common across nature and society, from microbial communities
 - `run_permuted_rank_analysis()` — Perform repeated analyses across permutations
 - `summarise_permuted_results()` — Summarize uncertainty distributions
 
-### Supported applications
-
-- Community ecology
-- Species abundance dynamics
-- Microbiome turnover
-- Forest succession
-- Evolutionary systems
-- Socioeconomic rankings
-- General ranked longitudinal datasets
-
 ---
 
 ## Installation
